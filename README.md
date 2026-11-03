@@ -23,6 +23,24 @@ the phone, and the car needs no companion account, dongle, cable, root or firmwa
 
 ![The car waiting with a 6-digit pairing code, and the CarWith session name](site/assets/connect.png)
 
+## What's new in 0.1.2
+
+**A phone that connects now actually reaches the projection screen** — 0.1.1 read the SDK's
+`parameter` argument as if it were the connection state, so every success was treated as "still
+advertising".
+
+- State codes are now taken from the SDK itself; the projection screen opens on connect and is no
+  longer torn down by the 30-second re-advertise watchdog.
+- The car no longer advertises a SoftAP capability a sideloaded APK can never have, which was
+  stalling phones at 10% of negotiation.
+- Leaving and re-entering projection no longer leaves a black screen (the rebuilt Surface is now
+  re-bound after pausing the old one).
+- Touch on the car screen is forwarded to the phone (ICCOA UIBC).
+- 32-bit / x86 head units are told their CPU cannot run the protocol stack, instead of crashing on
+  launch with `UnsatisfiedLinkError`.
+
+Details, including what was and was not verified, are in [CHANGELOG.md](CHANGELOG.md).
+
 ## What's new in 0.1.1
 
 Wording only — behaviour is identical to 0.1.0.

@@ -17,7 +17,7 @@ SITE = ROOT / 'site'
 data = json.loads((SITE / 'content.json').read_text(encoding='utf-8'))
 BASE = 'https://piggybackbayonet.github.io/MiAuto/'
 REPO = 'https://github.com/PiggyBackBayonet/MiAuto'
-VERSION = '0.1.1'
+VERSION = '0.1.2'
 TAG = 'v' + VERSION
 RELEASE = REPO + '/releases/tag/' + TAG
 DOWNLOAD = REPO + '/releases/download/' + TAG + '/MiAuto-' + VERSION + '.apk'

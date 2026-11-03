@@ -1,6 +1,7 @@
 package com.andrerinas.openheadunit.main
 
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -15,6 +16,7 @@ import com.andrerinas.openheadunit.App
 import com.andrerinas.openheadunit.R
 import com.andrerinas.openheadunit.aap.AapService
 import com.andrerinas.openheadunit.connection.IcocaBridge
+import com.andrerinas.openheadunit.connection.IcocaLinkState
 import com.andrerinas.openheadunit.icoca.IcocaProjectionActivity
 import kotlinx.coroutines.launch
 
@@ -77,11 +79,20 @@ class HomeFragment : Fragment() {
         val view = view ?: return
 
         val status = when (state.phase) {
-            IcocaBridge.Phase.Idle,
-            IcocaBridge.Phase.Advertising -> getString(R.string.da_ready)
+            IcocaLinkState.Phase.Idle,
+            IcocaLinkState.Phase.Advertising -> getString(R.string.da_ready)
 
-            IcocaBridge.Phase.Pairing -> getString(R.string.da_connecting)
-            IcocaBridge.Phase.Connected -> getString(R.string.da_connected)
+            IcocaLinkState.Phase.Pairing -> getString(R.string.da_connecting)
+            IcocaLinkState.Phase.Connected -> getString(R.string.da_connected)
+
+            // Say what actually failed. The SDK's error code is the only handle a user can report
+            // back, and "waiting for your phone" over a failed attempt was actively misleading.
+            IcocaLinkState.Phase.Error -> getString(R.string.da_link_failed, state.errorCode ?: 0)
+
+            // A head unit whose ABI has no protocol libraries will never connect. Naming the CPU
+            // here is the difference between "the app is broken" and "this box is 32-bit".
+            IcocaLinkState.Phase.Unsupported ->
+                getString(R.string.da_unsupported, Build.SUPPORTED_ABIS.joinToString("/"))
         }
         view.findViewById<TextView>(R.id.connection_status)?.text = status
 
@@ -98,13 +109,15 @@ class HomeFragment : Fragment() {
             }
         }
 
-        val connected = state.phase == IcocaBridge.Phase.Connected
+        val connected = state.phase == IcocaLinkState.Phase.Connected
         view.findViewById<View>(R.id.wifi_button)?.visibility =
             if (connected) View.VISIBLE else View.GONE
 
         // Refresh is pointless once a session is up, so it is the mirror image of "Open projection".
+        // It is equally pointless on a box that cannot run the link at all.
+        val unsupported = state.phase == IcocaLinkState.Phase.Unsupported
         view.findViewById<View>(R.id.refresh_pin_button)?.visibility =
-            if (connected) View.GONE else View.VISIBLE
+            if (connected || unsupported) View.GONE else View.VISIBLE
     }
 
     private fun openProjection() {

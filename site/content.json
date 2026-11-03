@@ -27,6 +27,7 @@
     "bssid": "If the phone cannot find the car, keep the phone's Bluetooth and Wi-Fi on, keep both screens awake, and try again. The car re-advertises itself every 30 seconds while it is unconnected, so a pairing prompt that was dismissed on the phone will come back on its own.",
     "whats": "What's new",
     "features": [
+      "**0.1.2 — a phone that connects now reaches the projection screen.** 0.1.1 read the SDK’s `parameter` argument as if it were the connection state, so every successful connect was treated as “still advertising”: the projection screen never opened, and the 30-second re-advertise watchdog cut into live sessions. State codes now come from the SDK itself; the car no longer advertises a hotspot capability a sideloaded APK can never have (that is what stalled phones at 10%); leaving and re-entering projection no longer leaves a black screen; touch on the car screen is forwarded to the phone; and 32-bit / x86 head units are told their CPU cannot run the protocol stack instead of crashing on launch.",
       "**0.1.1 — wording update.** ICCOA CarLink is a standard jointly initiated by Xiaomi, OPPO and vivo. The home screen, the About and Support screens and the legal notice now name Xiaomi CarWith, OPPO Car+ and vivo Jovi InCar together instead of Xiaomi alone, and Traditional Chinese home-screen strings were added. No behaviour change.",
       "**Wireless ICCOA CarLink reception** — Xiaomi CarWith, OPPO Car+, vivo Jovi InCar and similar phones; the phone stays in the pocket or on the wireless charger.",
       "**Automatic pairing code** with a 30-second re-advertise watchdog, so a dismissed prompt on the phone comes back without restarting the app.",
@@ -140,6 +141,7 @@
     "bssid": "若手机找不到车机，请保持手机蓝牙与 WiFi 开启、两块屏幕都亮着，然后重试。车机在未连接状态下每 30 秒重新广播一次，因此手机上被关掉的配对弹窗会自己回来。",
     "whats": "更新内容",
     "features": [
+      "**0.1.2 —— 手机连上了就能真的到投屏画面。** 0.1.1 把 SDK 的 `parameter` 参数当成连接状态，于是每一次「连上了」都被当作「还在广播」：投屏页从不打开，30 秒重播看门狗还会打断进行中的会话。现在状态码直接取 SDK 自身的语义；不再宣称侧载 APK 永远拿不到的热点能力（这正是手机卡在 10% 的原因）；退出再进投屏不再黑屏；车机屏幕上的触控会回传给手机；32 位 / x86 车机不再启动即崩，而是明确告知 CPU 架构不支持。",
       "**0.1.1 —— 文案更新。** ICCOA CarLink 是小米、OPPO、vivo 联合发起的标准。首页、「关于」「支持」页面与法务声明改为并列书写「小米 CarWith / OPPO Car+ 车联 / vivo Jovi InCar」，不再只提小米；并补上繁体中文首页文案。行为与 0.1.0 一致。",
       "**无线接收 ICCOA CarLink 手机端**（小米 CarWith / OPPO Car+ 车联 / vivo Jovi InCar 等）—— 手机放在兜里或无线充电板上即可。",
       "**配对码自动出现**，并带 30 秒重播看门狗：手机上误关的配对弹窗会自己回来，无需重启应用。",

@@ -31,6 +31,7 @@ import com.andrerinas.openheadunit.aap.AapService
 import com.andrerinas.openheadunit.app.BaseActivity
 import com.andrerinas.openheadunit.connection.CommManager
 import com.andrerinas.openheadunit.connection.IcocaBridge
+import com.andrerinas.openheadunit.connection.IcocaLinkState
 import com.andrerinas.openheadunit.icoca.IcocaProjectionActivity
 import com.andrerinas.openheadunit.utils.AppLog
 import com.andrerinas.openheadunit.utils.AppPermissions
@@ -302,7 +303,7 @@ class MainActivity : BaseActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 App.provide(this@MainActivity).icocaBridge.state.collect { icocaState ->
-                    if (icocaState.phase == IcocaBridge.Phase.Connected) {
+                    if (icocaState.phase == IcocaLinkState.Phase.Connected) {
                         // Open once per session: without the flag, coming back from the projection
                         // screen would bounce the user straight back into it, with no way out.
                         if (!icocaProjectionOpened && !IcocaProjectionActivity.isForeground) {

@@ -1,4 +1,4 @@
-# 安装 MiAuto 0.1.1
+# 安装 MiAuto 0.1.2
 
 把 APK 装到**车机的 Android 系统上**，不是装在手机上。
 已验证设备：Newland NLS-MT9055-GL（Android 11 / arm64）。比亚迪及其他车机**尚未验证**。
@@ -8,8 +8,8 @@
 ## 下载
 
 使用[下载页](https://piggybackbayonet.github.io/MiAuto/zh-Hans/)或
-[GitHub Release](https://github.com/PiggyBackBayonet/MiAuto/releases/tag/v0.1.1)。
-下载 `MiAuto-0.1.1.apk`。校验值随 APK 一并提供。
+[GitHub Release](https://github.com/PiggyBackBayonet/MiAuto/releases/tag/v0.1.2)。
+下载 `MiAuto-0.1.2.apk`。校验值随 APK 一并提供。
 
 ## 安装与连接
 
@@ -38,20 +38,20 @@
 
 ```sh
 adb connect CAR_IP:5555
-adb -s CAR_IP:5555 install -r MiAuto-0.1.1.apk
+adb -s CAR_IP:5555 install -r MiAuto-0.1.2.apk
 ```
 
 仓库内的安装脚本还会顺带授予 MiAuto 所需的运行时权限、打开定位、放行悬浮窗，
 并把应用加入电池优化白名单：
 
 ```sh
-./scripts/install.sh CAR_IP:5555 /absolute/path/to/MiAuto-0.1.1.apk
+./scripts/install.sh CAR_IP:5555 /absolute/path/to/MiAuto-0.1.2.apk
 ```
 
 装的是 debug 构建时，包名是 `com.miauto.app.debug`，用 `PKG=` 覆盖：
 
 ```sh
-PKG=com.miauto.app.debug ./scripts/install.sh CAR_IP:5555 MiAuto-0.1.1-debug.apk
+PKG=com.miauto.app.debug ./scripts/install.sh CAR_IP:5555 MiAuto-0.1.2-debug.apk
 ```
 
 ## 升级与签名
@@ -69,6 +69,16 @@ MiAuto 使用**自己的**包名（`com.miauto.app`）和**自己的**发布签�
   且默认关闭；若车机未向应用开放仪表区域，设置项会报告「功能不可用」。
 - 手机端需支持 ICCOA CarLink（小米 CarWith / OPPO Car+ 车联 / vivo Jovi InCar 等）；
   这不是 Android Auto，也不是 Apple CarPlay。
+- **只支持 64 位 ARM（arm64-v8a）车机。** 协议栈的 `libovmsink.so` / `libusbio.so` 只有 arm64 版本，
+  32 位 ARM、x86、x86_64 车机装得上但无法投屏。0.1.2 起这类设备启动后会直接在首页说明架构不支持，
+  不再闪退；在此之前是 `UnsatisfiedLinkError: libusbio.so` 直接崩溃。
+- **车机自己开热点（SoftAP）这条通道对侧载 APK 不可用。** 它需要 `TETHER_PRIVILEGED` 等系统签名权限。
+  0.1.2 起只声明 Wi-Fi Direct；若手机端此前把「车机热点」当作首选，会话会死在协商 10% 处。
+  用手机开热点、车机连上去是可以的（两条都进同一张网），但 ICCOA 的连接建立走的是 Wi-Fi Direct。
+- **Android 7 及以下不建议尝试。** 协议栈里用到了 `java.util.Base64`（API 26 起提供），
+  在更低版本上会以 `NoClassDefFoundError` 结束；这类设备同时也不满足上一条的 arm64 要求。
+- **配对链路未在真实手机上复测。** 0.1.2 的状态映射是对着 SDK 自身的回调（反汇编）与单元测试验证的，
+  构建时没有可用手机做端到端配对。首个真实配对结果请在 Issue 里反馈。
 
 ## 反馈问题
 

@@ -45,4 +45,6 @@
     <string name="da_bluetooth_music">Music through car Bluetooth</string>
     <string name="da_bluetooth_music_hint">Keep music with the car’s Bluetooth player. MiAuto leaves its audio focus alone; navigation and assistant audio remain available. Reconnect after changing this.</string>
     <string name="da_legal">MiAuto is an independent third-party open-source project, built on DiAuto Pro and Open Headunit. It is not affiliated with, authorized by or endorsed by BYD, ICCOA, Google, Xiaomi, OPPO, vivo or their trademark owners. ICCOA CarLink is an in-car connectivity standard jointly initiated by Xiaomi, OPPO and vivo; Xiaomi CarWith, OPPO Car+ and vivo Jovi InCar are its three phone-side front ends, and MiAuto is an independent receiver for it on the car side. All names and trademarks belong to their respective owners. This project is provided for learning and technical exchange only. Do not use it commercially. You are responsible for any consequences of its use.</string>
+    <string name="da_link_failed">Connection failed (code %1$d) — waiting for your phone again…</string>
+    <string name="da_unsupported">This car’s CPU can’t run the projection stack (%1$s). The protocol libraries ship for 64-bit ARM only.</string>
 </resources>

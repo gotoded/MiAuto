@@ -20,27 +20,68 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * MiAuto 车机端 ICCOA CarLink（小米 CarWith）SDK 生命周期管理器。
+ * MiAuto 车机端 ICCOA CarLink（小米 CarWith / OPPO Car+ 车联 / vivo Jovi InCar）SDK 生命周期管理器。
  *
- * <p>本类只管 SDK：初始化 / 广播 / 投屏 Surface / 回调转发。UI 与 BYD 输出通过
- * {@link Listener} 解耦（由 Activity 或 {@code IccoaNavigationBridge} 实现）。
+ * <p>本类只管 SDK：初始化 / 广播 / 投屏 Surface / 触控回传 / 回调转发。UI 与 BYD 输出通过
+ * {@link Listener} 解耦（由 Activity 或 {@code IcocaNavigationBridge} 实现）。
  *
  * <p><b>★ init-once 状态机</b>：{@link UCarAdapter#init} 在 SDK 内部是「进程一次性」
  * （{@code sIsServiceInitialized} 守门）。重启只 {@code startAdvertise()}，绝不重复 init，
  * 否则 BLE 广播状态残留，手机扫不到、{@code onPinCode} 不再触发。
  * {@link #stop()} 断开但保留初始化标志。
+ *
+ * <p><b>★★ 连接状态语义</b>（0.1.2 修正）：{@code ICarConnectListener#onConnectStateChanged}
+ * 的签名是 {@code (deviceID, state, parameter)} —— <b>第二个参数才是状态，第三个是随 state
+ * 变化的附加码</b>。0.1.1 及以前把第三个参数当状态用，于是所有回调都被映射成「广播中」，
+ * 投屏页永远打不开。对应关系由 SDK dex 反汇编实证（{@code UCarAdapter} 的各个回调
+ * 逐一调用 {@code notifyConnectStateChanged}）：
+ * <pre>
+ *   onWfdSinkReady          → state 4, parameter -1       投屏通道就绪（真正可以出画）
+ *   trySetDeviceConnected   → state 2, parameter -1       设备已连接（可开始绑定 Surface）
+ *   notifyDisconnected      → state 1, parameter 11 / -1  会话结束
+ *   onUserIntervention/失败  → state 3, parameter 10003/10007  连接失败（需用户干预/超时）
+ *   onWfdSinkStopped        → state 5, parameter -1       投屏通道停止（会话可能仍在）
+ *   onGoToDesktop           → state 6, parameter -1       手机回桌面
+ *   onBackToForeground      → state 7, parameter -1       手机回前台
+ * </pre>
  */
 public class IccoaManager {
 
     private static final String TAG = "MiAuto/ICCOA";
 
+    // ---- 连接状态（ICarConnectListener#onConnectStateChanged 的 state 参数）----
+
+    /** 会话结束（SDK 的 {@code notifyDisconnected}）。 */
+    public static final int ST_DISCONNECTED = 1;
+    /** 设备已连接，尚未出画（SDK 的 {@code trySetDeviceConnected}）。 */
+    public static final int ST_CONNECTED = 2;
+    /** 连接失败 / 需要用户干预（parameter 为错误码，如 10003、10007）。 */
+    public static final int ST_FAILED = 3;
+    /** 投屏通道（WFD sink）就绪（SDK 的 {@code onWfdSinkReady}）。 */
+    public static final int ST_WFD_READY = 4;
+    /** 投屏通道停止（SDK 的 {@code onWfdSinkStopped}）。 */
+    public static final int ST_WFD_STOPPED = 5;
+    /** 手机侧回到桌面（不影响会话）。 */
+    public static final int ST_PHONE_DESKTOP = 6;
+    /** 手机侧回到前台（不影响会话）。 */
+    public static final int ST_PHONE_FOREGROUND = 7;
+
     /** 事件回调。由 UI / 导航桥接实现。 */
     public interface Listener {
         void onLog(String msg);
-        /** 已连接状态变化：0 断开 / 1 连接中 / 2 已连接 / 3 已建立 */
-        void onConnectionState(int state);
+
+        /**
+         * 连接状态变化。
+         *
+         * @param state     {@link #ST_DISCONNECTED} 等常量
+         * @param parameter {@link #ST_FAILED} 时为错误码，其余通常为 -1
+         */
+        void onConnectionStateChanged(int state, int parameter);
+
         void onPinCode(String pinCode, String carDeviceName);
+
         void onCastStarted();
+
         /** 手机导航信息（POC-2 / BYD 仪表与 HUD 的数据源）。 */
         void onNavigation(UCarCommon.NavigationInfo info);
     }
@@ -51,6 +92,9 @@ public class IccoaManager {
 
     private UCarAdapter adapter = null;
     private Surface surface = null;
+
+    /** 已经交给 SDK 的那块 Surface。与 {@link #surface} 不同即意味着「换了一块，必须重绑」。 */
+    private Surface castSurface = null;
 
     /** {@link #tryStartCast()} 的重试预算（×500ms = 最长 10 秒）。 */
     private static final int CAST_RETRY_MAX = 20;
@@ -74,7 +118,21 @@ public class IccoaManager {
      */
     private static final long AUTO_REFRESH_INTERVAL_MS = 30_000L;
 
-    /** 会话是否正在进行（手机连接中或已连接）。由连接回调维护，看门狗据此避让。 */
+    /**
+     * 是否向手机宣称「本机可以自己开热点（SoftAP）」。
+     *
+     * <p><b>侧载 APK 必须为 false。</b> 车机热点走 {@code WifiApService}，要
+     * {@code TETHER_PRIVILEGED} / {@code OVERRIDE_WIFI_CONFIG} / {@code NETWORK_SETTINGS}，
+     * 三者都是 {@code signature|privileged} —— 侧载拿不到，热点永远起不来。可一旦在
+     * {@code UCarConfig} 里宣称支持，手机端就会优先选 AP 通道，协商精确地死在 10% 后失败，
+     * 表现为「输完配对码一直连不上 / 正在验证后超时」。只宣称 P2P 后，SDK 走
+     * {@code WifiP2pService}，会话可以走到 100%。
+     *
+     * <p>只有当车机是系统签名 / 预装（真的能开热点）时才改回 true —— 那样两条通道都可选。
+     */
+    private static final boolean SUPPORT_SOFT_AP = false;
+
+    /** 会话是否正在进行（已连接或已出画）。由连接回调维护，看门狗据此避让。 */
     private volatile boolean sessionActive = false;
 
     /**
@@ -96,15 +154,20 @@ public class IccoaManager {
         main.postDelayed(reAdvertiseRunnable, RE_ADVERTISE_DELAY_MS);
     }
 
+    private void cancelReAdvertise() {
+        main.removeCallbacks(reAdvertiseRunnable);
+    }
+
     /**
      * 配对码看门狗：每隔 {@link #AUTO_REFRESH_INTERVAL_MS} 检查一次，仍未连上就重播一次。
      *
      * <p>这是「刷新出来的新码没人来连，之后就再也不刷新」的解法 —— 那种情况下手机端弹窗
      * 已经关掉，车机只能靠重播把它重新叫出来，否则用户点开 CarWith 也发现不了车机。
      *
-     * <p>避让规则：手机正在连接或已连上（{@link #sessionActive}）、或画面已经投出去
-     * （{@code castStarted}）时一律跳过，绝不打断进行中的会话。新码下发时计时会重置，
-     * 保证用户拿到完整的 30 秒去输入。
+     * <p>避让规则：只要会话已经建立（{@link #sessionActive}）或画面已经投出去
+     * （{@code castStarted}）就一律跳过。0.1.1 的判定写错了参数（拿附加码当状态），
+     * 于是 {@code sessionActive} 永远是 false —— 配对进行到一半就被重播打断，
+     * 刚下发的配对码被换成新的，手机端因此停在「正在验证」直到超时。
      */
     private final Runnable autoRefreshRunnable = () -> {
         if (!sdkReady || adapter == null) return;
@@ -139,13 +202,55 @@ public class IccoaManager {
         screenW = w; screenH = h; videoW = w; videoH = h;
     }
 
+    /** 投屏画面（= 手机端坐标系）的宽高。UIBC 回传的触控坐标必须落在这个空间里。 */
+    public int getVideoWidth() { return videoW; }
+
+    public int getVideoHeight() { return videoH; }
+
     public String getLastPinCode() { return lastPinCode; }
 
-    /** Surface 就绪 / 变化（Activity 的 surfaceChanged 回调里调用）。 */
+    /**
+     * Surface 就绪 / 变化（Activity 的 surfaceCreated / surfaceChanged 回调里调用）。
+     *
+     * <p><b>换 Surface 必须先让 SDK 停手。</b> {@code startCast} 一旦成功，SDK 就会持续往
+     * 那块 BufferQueue 写帧；投屏页退出、窗口重建都会销毁旧 Surface，此时若只是「把新
+     * Surface 传进来」而不复位状态，{@code tryStartCast()} 会因为 {@code castStarted} 仍为
+     * true 直接返回，SDK 继续往已废弃的队列里解码 —— 报 {@code BufferQueue has been
+     * abandoned / -19}，画面永久黑掉而声音还在。
+     */
     public void setSurface(Surface s) {
+        if (s != null && s == castSurface && castStarted) {
+            // 同一个 Surface 的重复回调（surfaceChanged 常见）：无需重绑。
+            return;
+        }
+        if (castStarted) {
+            log("Surface 变更 → 先 pauseCast()，再绑定新 Surface");
+            pauseCastQuietly();
+            castStarted = false;
+            castSurface = null;
+        }
         this.surface = s;
         castRetry = 0;          // 新 Surface 到位，重试预算重置
         tryStartCast();
+    }
+
+    /**
+     * Surface 被销毁（Activity 的 {@code surfaceDestroyed}）。
+     *
+     * <p>不主动停手的后果见 {@link #setSurface(Surface)}：SDK 会对废弃的 BufferQueue 解码并
+     * 报致命 -19，之后同一会话再也恢复不了画面。
+     */
+    public void onSurfaceDestroyed() {
+        log("Surface 销毁 → pauseCast，等待新 Surface 重新绑定");
+        if (castStarted) pauseCastQuietly();
+        castStarted = false;
+        castSurface = null;
+        surface = null;
+    }
+
+    private void pauseCastQuietly() {
+        if (adapter == null) return;
+        try { adapter.pauseCast(); } catch (Throwable t) { log("pauseCast 异常: " + t); }
     }
 
     // ==================================================================
@@ -154,7 +259,7 @@ public class IccoaManager {
 
     /** 启动（或重启）投屏链路。权限由调用方（Activity）负责。 */
     public void start() {
-        log("=== 启动（ICCOA CarWith）===");
+        log("=== 启动（ICCOA CarLink）===");
         if (sdkInitialized && adapter != null) {
             log("重启：SDK 已初始化，仅重新广播");
             reAdvertise();
@@ -216,9 +321,13 @@ public class IccoaManager {
         try { adapter.stopAdvertise(); } catch (Throwable t) { log("stopAdvertise(重播前) 异常: " + t); }
         sdkReady = true;
         castStarted = false;
+        castSurface = null;
         castRetry = 0;
         lastPinCode = null;
+        sessionActive = false;
         doAdvertise();
+        // 重播之后回到「等待手机」—— 让界面上的失败提示 / 旧配对码及时收回去。
+        notifyState(ST_DISCONNECTED, -1);
     }
 
     /**
@@ -251,6 +360,7 @@ public class IccoaManager {
         cancelAutoRefresh();
         sessionActive = false;
         castStarted = false;
+        castSurface = null;
         sdkReady = false;
         lastPinCode = null;
         // 保留 sdkInitialized —— init() 进程一次性，重启只走 reAdvertise()。
@@ -270,13 +380,14 @@ public class IccoaManager {
         }
         sessionActive = false;
         castStarted = false;
+        castSurface = null;
         lastPinCode = null;
         scheduleReAdvertise();
         scheduleAutoRefresh();
     }
 
     // ==================================================================
-    // 广播 / 投屏
+    // 广播 / 投屏 / 触控
     // ==================================================================
 
     private void doAdvertise() {
@@ -306,9 +417,35 @@ public class IccoaManager {
         castRetry = 0;
         boolean ok = adapter.startCast(s, videoW, videoH);
         castStarted = ok;
+        castSurface = ok ? s : null;
         log((ok ? "✓ " : "✗ ") + "startCast(" + videoW + "x" + videoH + ") = " + ok);
         if (ok) {
             main.post(listener::onCastStarted);
+        }
+    }
+
+    /**
+     * 把车机上的触控事件回传给手机（ICCOA 的 UIBC 通道）。
+     *
+     * <p>参数语义取自 SDK 自身：{@code UCarAdapter#sendTouchEvent(int action, int count,
+     * int[] trackID, int[] x, int[] y)}，三个数组长度必须都等于 {@code count}；
+     * 坐标是<b>车机显示区（{@code setVideoDisplayWidth/Height} 声明的那块）</b>的像素，
+     * SDK 内部再按比例换算回手机的 source 坐标系。
+     *
+     * @return false 表示通道尚未就绪（加密未完成 / 未连接），调用方可以忽略
+     */
+    public boolean sendTouchEvent(int action, int count, int[] trackIds, int[] xs, int[] ys) {
+        if (adapter == null || count <= 0) return false;
+        if (trackIds == null || xs == null || ys == null) return false;
+        if (trackIds.length != count || xs.length != count || ys.length != count) {
+            log("sendTouchEvent 参数长度不一致，丢弃");
+            return false;
+        }
+        try {
+            return adapter.sendTouchEvent(action, count, trackIds, xs, ys);
+        } catch (Throwable t) {
+            log("sendTouchEvent 异常: " + t);
+            return false;
         }
     }
 
@@ -327,25 +464,61 @@ public class IccoaManager {
         }
 
         @Override
-        public void onConnectStateChanged(String deviceID, int oldState, int newState) {
-            log("onConnectStateChanged " + stateName(oldState) + " -> " + stateName(newState));
-            if (newState == 0 && oldState != 0) {
-                // 会话真正结束（不是启动时的初始 DISCONNECTED）。清掉已过期的配对码并延时重新
-                // 广播：手机端 CarWith 会重新发现车机并触发一次全新配对（新的 onPinCode）。
-                sessionActive = false;
-                lastPinCode = null;
-                castStarted = false;
-                scheduleReAdvertise();
-                scheduleAutoRefresh();
-            } else if (newState == 2 || newState == 3) {
-                // 已连上：撤销任何待执行的重新广播，免得刚连上就被重启广播打断；看门狗也会因此空转。
-                sessionActive = true;
-                main.removeCallbacks(reAdvertiseRunnable);
+        public void onConnectStateChanged(String deviceID, int state, int parameter) {
+            log("onConnectStateChanged state=" + stateName(state) + " parameter=" + parameter);
+            switch (state) {
+                case ST_DISCONNECTED:
+                    // 会话真正结束：清掉已过期的配对码并延时重新广播，手机端 CarWith 会重新发现
+                    // 车机并触发一次全新配对（新的 onPinCode）。
+                    sessionActive = false;
+                    castStarted = false;
+                    castSurface = null;
+                    lastPinCode = null;
+                    scheduleReAdvertise();
+                    scheduleAutoRefresh();
+                    break;
+
+                case ST_CONNECTED:
+                    // 设备已连接：撤销待执行的重新广播与看门狗，绝不打断进行中的会话。
+                    sessionActive = true;
+                    cancelReAdvertise();
+                    cancelAutoRefresh();
+                    break;
+
+                case ST_FAILED:
+                    // 失败 / 需要用户干预（parameter 是错误码）。会话没建立，重播一次把手机叫回来。
+                    log("✗ 连接失败，错误码 " + parameter + " → 重播以重新触发配对");
+                    sessionActive = false;
+                    castStarted = false;
+                    castSurface = null;
+                    lastPinCode = null;
+                    scheduleReAdvertise();
+                    scheduleAutoRefresh();
+                    break;
+
+                case ST_WFD_READY:
+                    // 投屏通道就绪：会话必定在。丢掉旧的 cast 绑定，让新的 Surface 重新起投。
+                    sessionActive = true;
+                    cancelReAdvertise();
+                    cancelAutoRefresh();
+                    castStarted = false;
+                    castSurface = null;
+                    main.post(IccoaManager.this::tryStartCast);
+                    break;
+
+                case ST_WFD_STOPPED:
+                    // 通道停了但会话可能还活着（手机会重开），只复位 cast，不动 phase。
+                    castStarted = false;
+                    castSurface = null;
+                    break;
+
+                case ST_PHONE_DESKTOP:
+                case ST_PHONE_FOREGROUND:
+                default:
+                    // 手机侧的界面切换，与车机会话无关。
+                    break;
             }
-            // newState == 1（CONNECTING）刻意不置 sessionActive：若协商卡死超过一个刷新周期，
-            // 看门狗需要能重播把它救回来。正常协商只需数秒，30 秒的余量足够。
-            final int st = newState;
-            main.post(() -> listener.onConnectionState(st));
+            notifyState(state, parameter);
         }
 
         @Override
@@ -365,21 +538,23 @@ public class IccoaManager {
 
         @Override
         public UCarCommon.WorkMode onSelectWorkMode(String deviceID, UCarCommon.WorkMode supported) {
+            // 与 buildConfig() 里声明的一致：只声明了普通投屏，就优先选它。0.1.1 先挑
+            // APP_WINDOW_CAST，与配置自相矛盾，手机端可能据此协商出车机并不支持的形态。
             UCarCommon.WorkMode chosen;
             if (supported == null) {
                 chosen = UCarCommon.WorkMode.NONE;
-            } else if (supported.isSupportAppWindowCast()) {
-                chosen = UCarCommon.WorkMode.APP_WINDOW_CAST;
-            } else if (supported.isSupportAppFullScreenCast()) {
-                chosen = UCarCommon.WorkMode.APP_FULLSCREEN_CAST;
             } else if (supported.isSupportNormalCast()) {
                 chosen = UCarCommon.WorkMode.NORMAL_CAST;
+            } else if (supported.isSupportAppFullScreenCast()) {
+                chosen = UCarCommon.WorkMode.APP_FULLSCREEN_CAST;
+            } else if (supported.isSupportAppWindowCast()) {
+                chosen = UCarCommon.WorkMode.APP_WINDOW_CAST;
             } else if (supported.isSupportDataTransfer()) {
                 chosen = UCarCommon.WorkMode.DATA_TRANSFER;
             } else {
                 chosen = UCarCommon.WorkMode.NONE;
             }
-            log("onSelectWorkMode → " + chosen);
+            log("onSelectWorkMode → " + chosen + "（手机声明 " + supported + "）");
             return chosen;
         }
     };
@@ -435,6 +610,9 @@ public class IccoaManager {
                 .setSupportAppWindowCast(false)
                 .build();
 
+        log("通道声明：P2P=true SoftAP=" + SUPPORT_SOFT_AP
+                + (SUPPORT_SOFT_AP ? "" : "（侧载 APK 拿不到热点权限，见 SUPPORT_SOFT_AP 注释）"));
+
         return new UCarConfig.Builder()
                 .setCarBrMac(carId)                  // 必须恰好 6 字节
                 .setDpi(dpi)                         // 120..640
@@ -445,7 +623,7 @@ public class IccoaManager {
                 .setVideoDisplayWidth(vw)
                 .setVideoDisplayHeight(vh)
                 .setSupportP2P(true)
-                .setSupportSoftAP(true)
+                .setSupportSoftAP(SUPPORT_SOFT_AP)
                 .setSupportCamera(false)
                 .setSupportHevc(false)
                 .setSupportMic(true)
@@ -462,22 +640,37 @@ public class IccoaManager {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
+    /**
+     * 车机身份（6 字节 BR MAC）。
+     *
+     * <p>Android 6 起非系统应用调用 {@code BluetoothAdapter.getAddress()} 只会拿到
+     * {@code 02:00:00:00:00:00} —— 这是占位值不是真实地址。把它当身份发给 SDK，所有侧载车机
+     * 就会共用同一个 id，手机端会把它当成「同一台车」而拒绝/复用错误的会话。
+     * 因此占位值与全零一律作废，退回随机值；需要在多台车机上做区分时，可用
+     * {@code car_id_prefs/car_id_override_mac} 显式指定真实地址。
+     */
     private byte[] generateCarId() {
         SharedPreferences prefs = appCtx.getSharedPreferences("car_id_prefs", Context.MODE_PRIVATE);
+
+        byte[] override = parseMac(prefs.getString("car_id_override_mac", null));
+        if (override != null) return override;
+
         String saved = prefs.getString("car_id_key", "");
         if (saved != null && !saved.isEmpty()) {
             try {
                 byte[] cached = Base64.decode(saved, Base64.NO_WRAP);
-                if (cached != null && cached.length == 6) return cached;
-                log("carId 缓存长度≠6，作废重生成");
+                if (cached != null && cached.length == 6 && !isPlaceholder(cached)) return cached;
+                log("carId 缓存长度≠6 或为占位地址，作废重生成");
             } catch (Throwable t) {
                 log("carId 缓存解码失败: " + t);
             }
         }
         byte[] raw = getBluetoothMac();
-        if (raw == null || raw.length != 6) {
+        if (raw == null || raw.length != 6 || isPlaceholder(raw)) {
             raw = new byte[6];
             new Random().nextBytes(raw);
+            // 别把随机值撞成广播/组播地址。
+            raw[0] = (byte) ((raw[0] & 0xFC) | 0x02);
         }
         prefs.edit().putString("car_id_key", Base64.encodeToString(raw, Base64.NO_WRAP)).apply();
         return raw;
@@ -485,24 +678,48 @@ public class IccoaManager {
 
     @android.annotation.SuppressLint("MissingPermission")
     private byte[] getBluetoothMac() {
-        byte[] macBytes = new byte[6];
         try {
             android.bluetooth.BluetoothManager bm =
                     (android.bluetooth.BluetoothManager) appCtx.getSystemService(Context.BLUETOOTH_SERVICE);
             android.bluetooth.BluetoothAdapter a = (bm == null) ? null : bm.getAdapter();
             String mac = (a == null) ? null : a.getAddress();
-            if (mac != null) {
-                String[] seg = mac.split(":");
-                if (seg.length == 6) {
-                    for (int i = 0; i < 6; i++) macBytes[i] = (byte) Integer.parseInt(seg[i], 16);
-                    return macBytes;
-                }
-            }
+            byte[] parsed = parseMac(mac);
+            if (parsed != null) return parsed;
+            log("读到的蓝牙地址不可用（占位/无权限）: " + mac);
         } catch (Throwable t) {
             log("读蓝牙 MAC 被拒（缺 BLUETOOTH_CONNECT？）: " + t);
         }
-        new Random().nextBytes(macBytes);
-        return macBytes;
+        return null;
+    }
+
+    /** 把 {@code AA:BB:CC:DD:EE:FF} 解析成 6 字节；占位地址与非法串一律返回 null。 */
+    private byte[] parseMac(String mac) {
+        if (mac == null) return null;
+        String[] seg = mac.split(":");
+        if (seg.length != 6) return null;
+        byte[] out = new byte[6];
+        try {
+            for (int i = 0; i < 6; i++) out[i] = (byte) Integer.parseInt(seg[i], 16);
+        } catch (Throwable t) {
+            return null;
+        }
+        return isPlaceholder(out) ? null : out;
+    }
+
+    /** {@code 02:00:00:00:00:00} 与全零都是「没有真实地址」的占位值。 */
+    private static boolean isPlaceholder(byte[] mac) {
+        if (mac == null || mac.length != 6) return true;
+        boolean allZero = true;
+        for (byte b : mac) if (b != 0) { allZero = false; break; }
+        if (allZero) return true;
+        return mac[0] == 0x02 && mac[1] == 0 && mac[2] == 0
+                && mac[3] == 0 && mac[4] == 0 && mac[5] == 0;
+    }
+
+    private void notifyState(int state, int parameter) {
+        main.post(() -> {
+            try { listener.onConnectionStateChanged(state, parameter); } catch (Throwable ignored) { }
+        });
     }
 
     private void log(String msg) {
@@ -516,10 +733,13 @@ public class IccoaManager {
 
     private static String stateName(int s) {
         switch (s) {
-            case 0: return "DISCONNECTED";
-            case 1: return "CONNECTING";
-            case 2: return "CONNECTED";
-            case 3: return "ESTABLISHED";
+            case ST_DISCONNECTED: return "DISCONNECTED(1)";
+            case ST_CONNECTED: return "CONNECTED(2)";
+            case ST_FAILED: return "FAILED(3)";
+            case ST_WFD_READY: return "WFD_READY(4)";
+            case ST_WFD_STOPPED: return "WFD_STOPPED(5)";
+            case ST_PHONE_DESKTOP: return "PHONE_DESKTOP(6)";
+            case ST_PHONE_FOREGROUND: return "PHONE_FOREGROUND(7)";
             default: return "STATE_" + s;
         }
     }
