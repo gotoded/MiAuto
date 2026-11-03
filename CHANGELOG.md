@@ -1,3 +1,46 @@
+# MiAuto 0.1.3 — 2026-11-03
+
+## The negotiated canvas was wrong on any panel that is not 1920x720
+
+`MainActivity` reported the panel as *long side first, always*, and `IccoaManager` fell back to a
+hardcoded `1920x720`. The canvas is fixed at `init()` time and no API changes it afterwards, so a
+portrait head unit or a tablet negotiated a landscape canvas: the picture is stretched, and because
+UIBC touches are mapped into the *actual* Surface bounds, every tap lands somewhere else.
+
+- The canvas now comes from the real display at runtime (`DeviceDisplay`: window bounds on API 30+,
+  `getRealMetrics()` below that, `Resources` as a last resort) and is never invented. When it cannot
+  be measured the app waits 400 ms and retries up to six times, because a guessed canvas is silently
+  baked into the negotiation and nothing corrects it afterwards.
+- Its ordering follows the screen-orientation setting (`ScreenSizePolicy`): portrait reports short
+  side first, landscape long side first, SYSTEM/AUTO pass the window through as-is.
+- If the measured canvas no longer matches the one baked into `UCarConfig` — rotation, a display
+  change, a different panel — the SDK is now torn down and re-initialised before reconnecting.
+  Previously the stale config was re-advertised forever.
+
+## Re-advertising no longer hammers a radio that is still tearing down
+
+After an abnormal disconnect the phone's Wi-Fi P2P group is still being recycled, but the car
+re-advertised on a fixed 1.2 s and collected `10003` / `10006` / `10008` back to back — each attempt
+pushing the shared radio further out of shape. Consecutive wireless bring-up failures now back off
+exponentially (`1.2 s → 2.4 s → 4.8 s`, capped at 8 s). The streak resets on connect, on WFD ready,
+and on any non-wireless error (`ReconnectBackoff`).
+
+## Credit
+
+Both changes are adapted from [guo-zhc/MiAuto](https://gitee.com/guo-zhc/MiAuto) (AGPL-3.0), an
+independent fork of this project's 0.1.1 that had already solved them and wrote down the reasoning.
+
+## Verified / not verified
+
+Verified: **723 unit tests pass, 15 of them new** (`ScreenSizePolicyTest`, `ReconnectBackoffTest`)
+pinning the ordering, the re-negotiation decision and every backoff step. The release APK builds and
+keeps the signing key of 0.1.0–0.1.2, so it upgrades in place.
+
+Not verified: a real head unit. The test device's wireless ADB was closed while this was built, so
+none of it was exercised on hardware — including the `deInit()` + re-init path, which is the one
+change here with a failure mode worth watching. If reconnects start failing after a rotation, that
+is the first place to look.
+
 # MiAuto 0.1.2 — 2026-11-03
 
 

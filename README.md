@@ -23,6 +23,21 @@ the phone, and the car needs no companion account, dongle, cable, root or firmwa
 
 ![The car waiting with a 6-digit pairing code, and the CarWith session name](site/assets/connect.png)
 
+## What's new in 0.1.3
+
+Two fixes taken from [guo-zhc/MiAuto](https://gitee.com/guo-zhc/MiAuto), an independent fork of
+this project's 0.1.1:
+
+- **The canvas is now measured, not assumed.** It used to be reported long-side-first with a
+  hardcoded `1920x720` fallback, which is wrong on a portrait head unit: stretched picture and
+  touches that land elsewhere. It now comes from the real display, ordered by the screen-orientation
+  setting, and the SDK is re-initialised when it changes.
+- **Reconnect backoff.** Consecutive wireless bring-up failures (`10003`/`10006`/`10008`) now wait
+  1.2 → 2.4 → 4.8 s (capped at 8 s) instead of hammering the radio every 1.2 s while the phone's
+  P2P group is still tearing down.
+
+Details, including what was and was not verified, are in [CHANGELOG.md](CHANGELOG.md).
+
 ## What's new in 0.1.2
 
 **A phone that connects now actually reaches the projection screen** — 0.1.1 read the SDK's
@@ -212,6 +227,11 @@ MiAuto is built on [DiAuto Pro](https://github.com/zutaozhong-hash/DiAuto-Pro), 
 fork of [DiAuto](https://github.com/shihabal3amri/DiAuto), which is an independent fork of
 [Open Headunit](https://github.com/andreknieriem/open-headunit), based on work by its
 contributors and [Michael Reid](https://github.com/mikereidis/headunit).
+
+Thanks are also due to [guo-zhc/MiAuto](https://gitee.com/guo-zhc/MiAuto), an independent fork of
+this project's 0.1.1 that took it much further. Two of its solutions are used here — measuring the
+real display at runtime with orientation-aware canvas ordering, and the re-advertise backoff — and
+both were correct calls this project had missed. It is AGPL-3.0, same as this repository.
 
 MiAuto is licensed **AGPL-3.0**. See [LICENSE](LICENSE) and the original copyright notices in
 `COPYRIGHT_MICHAEL_REID_GPLv3AFFERO.txt`. This repository contains the source for the

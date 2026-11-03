@@ -20,6 +20,17 @@ Car+ 车联或 Jovi InCar 的手机配对 —— 小米 / OPPO / vivo 等皆可�
 
 ![车机待连时显示 6 位配对码](site/assets/connect.png)
 
+## 0.1.3 更新内容
+
+两项修复取自 [guo-zhc/MiAuto](https://gitee.com/guo-zhc/MiAuto)（本仓库 0.1.1 的独立二开分支）：
+
+- **画布改为实测，不再假设。** 以前无条件「长边在前」并写死 1920x720 兜底，在竖屏车机上就是错的：
+  画面拉伸、触控点位整体偏移。现在从系统读真实显示尺寸，按屏幕方向设置归序，画布变化时重 init SDK。
+- **重连指数退避。** 连续无线建链失败（`10003`/`10006`/`10008`）改为 1.2 → 2.4 → 4.8 秒（封顶 8 秒），
+  不再在手机 P2P 组还在回收时每 1.2 秒硬撞一次。
+
+细节与验证边界见 [CHANGELOG-zh.md](CHANGELOG-zh.md)。
+
 ## 0.1.2 更新内容
 
 **手机连上了，车机就真的会到投屏画面。** 0.1.1 把 SDK 的 `parameter` 参数当成连接状态，
@@ -181,6 +192,10 @@ MiAuto 以 [DiAuto Pro](https://github.com/zutaozhong-hash/DiAuto-Pro) 为基座
 后者是 [DiAuto](https://github.com/shihabal3amri/DiAuto) 的独立分支，
 再往前是 [Open Headunit](https://github.com/andreknieriem/open-headunit)，
 基于其贡献者与 [Michael Reid](https://github.com/mikereidis/headunit) 的工作。
+
+同时感谢 [guo-zhc/MiAuto](https://gitee.com/guo-zhc/MiAuto) —— 本仓库 0.1.1 的独立二开分支，
+它把这条路走得远得多。本版采用的「运行时读取真实画布 + 按屏幕方向归序」与「重播指数退避」
+两项都出自它的实现，也都补上了本仓库此前判断错的地方。它同样以 AGPL-3.0 发布。
 
 MiAuto 采用 **AGPL-3.0** 许可。见 [LICENSE](LICENSE) 与
 `COPYRIGHT_MICHAEL_REID_GPLv3AFFERO.txt` 中的原始版权声明。本仓库包含已发布应用的源码。

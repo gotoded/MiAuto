@@ -151,7 +151,13 @@ public class IccoaManager {
 
     private void scheduleReAdvertise() {
         main.removeCallbacks(reAdvertiseRunnable);
-        main.postDelayed(reAdvertiseRunnable, RE_ADVERTISE_DELAY_MS);
+        boolean wireless = ReconnectBackoff.isWirelessBringupFailure(lastErrorCode);
+        long delay = ReconnectBackoff.nextDelayMs(wireless, wirelessFailStreak);
+        if (delay != RE_ADVERTISE_DELAY_MS) {
+            log("重播退避 " + delay + "ms（连续无线建链失败 " + wirelessFailStreak
+                    + " 次，错误码 " + lastErrorCode + "）");
+        }
+        main.postDelayed(reAdvertiseRunnable, delay);
     }
 
     private void cancelReAdvertise() {
@@ -191,15 +197,48 @@ public class IccoaManager {
     }
 
     // ---- 屏幕尺寸 ----
-    private int screenW = 1920, screenH = 720, videoW = 1920, videoH = 720;
+    /**
+     * 协商画布。{@code 0} = 还没量到 —— {@link DeviceDisplay} 取不到时不会编一个常见值顶替，
+     * 因为错误画布一旦报给手机端，之后没有任何环节会纠正它（画面拉伸、触控整体偏移）。
+     *
+     * <p>{@code videoW/videoH} 是 UIBC 触控坐标的除数，不能为 0，所以保留上一次有效值；
+     * 首次 {@link #setScreenSize} 之前用 1920x720 只为不除零，真正投入使用的画布一定来自实测。
+     */
+    private int screenW = 0, screenH = 0, videoW = 1920, videoH = 720;
+
+    /** 灌进 {@code UCarConfig} 的那一份画布；判断「这次连接要不要重谈」就靠它。 */
+    private volatile int initCanvasW = 0, initCanvasH = 0;
+
+    /** 本会话内连续「无线建链类失败」次数，{@link ReconnectBackoff} 据此放大重播间隔。 */
+    private int wirelessFailStreak = 0;
+
+    /** 最近一次失败的错误码（{@code state == 3} 的 parameter），决定这次要不要退避。 */
+    private int lastErrorCode = -1;
 
     public IccoaManager(Context ctx, Listener listener) {
         this.appCtx = ctx.getApplicationContext();
         this.listener = listener;
     }
 
+    /**
+     * 灌入这块屏的真实画布（已按用户设置的屏幕方向归好序，见 {@link ScreenSizePolicy}）。
+     *
+     * <p>无效值一律不落库：把 0 或负数报给手机端，协商出来的就是一格像素的画布。
+     * 宁可维持「未量到」让上层重试。
+     */
     public void setScreenSize(int w, int h) {
-        screenW = w; screenH = h; videoW = w; videoH = h;
+        if (w <= 0 || h <= 0) {
+            log("! 忽略无效的屏幕尺寸 " + w + "x" + h + " —— 保留上一次有效值，等重试");
+            return;
+        }
+        if (w != screenW || h != screenH) {
+            log("协商画布 " + w + "x" + h
+                    + (initCanvasW > 0 ? "（init 时 " + initCanvasW + "x" + initCanvasH + "）" : "（首次）"));
+        }
+        screenW = w;
+        screenH = h;
+        videoW = w;
+        videoH = h;
     }
 
     /** 投屏画面（= 手机端坐标系）的宽高。UIBC 回传的触控坐标必须落在这个空间里。 */
@@ -261,9 +300,12 @@ public class IccoaManager {
     public void start() {
         log("=== 启动（ICCOA CarLink）===");
         if (sdkInitialized && adapter != null) {
-            log("重启：SDK 已初始化，仅重新广播");
-            reAdvertise();
-            return;
+            if (!renegotiateIfStale("start")) {
+                log("重启：SDK 已初始化，仅重新广播");
+                reAdvertise();
+                return;
+            }
+            log("画布已变 → 旧 SDK 已拆，走完整重 init");
         }
         UCarConfig config;
         try {
@@ -280,7 +322,61 @@ public class IccoaManager {
             log("✗ getInstance/register 异常: " + t);
             return;
         }
+        // 记下这份 config 实际带的画布，供下一次 start() 判断是否需要重谈。
+        initCanvasW = screenW;
+        initCanvasH = screenH;
         initSdk(config);
+    }
+
+    /**
+     * 协商画布在 {@code init()} 那一刻定死，运行期没有任何 API 能改。
+     *
+     * <p>横竖互换、换屏、改显示大小之后若仍拿旧 config 重播，手机端就按旧画布编码 ——
+     * 画面被拉伸、UIBC 触控整体错位。这种时候只能拆掉 SDK 重新 init。
+     *
+     * @return true = 已经拆过，调用方必须继续走完整的 init 流程，不能再走重播分支
+     */
+    private boolean renegotiateIfStale(String reason) {
+        if (!ScreenSizePolicy.needsRenegotiation(screenW, screenH, initCanvasW, initCanvasH)) {
+            return false;
+        }
+        log("协商画布需重谈（init " + initCanvasW + "x" + initCanvasH
+                + " → 现在 " + screenW + "x" + screenH + "）→ 拆 SDK 重新 init（" + reason + "）");
+        deinitAdapter();
+        return true;
+    }
+
+    /**
+     * 拆掉 SDK 连接层，让下一次 {@link #start()} 走完整 init。
+     *
+     * <p>{@code deInit()} 之后 {@code getInstance()} 仍返回同一单例，可以重新 init —— 这是
+     * 「改方向/换屏后重连仍按旧画布」唯一的解法。任一步失败都只记日志：把 SDK 拆到一半比
+     * 带着旧画布重播更糟，所以每一步独立 try，保证后面的清理一定执行。
+     */
+    private void deinitAdapter() {
+        cancelReAdvertise();
+        cancelAutoRefresh();
+        if (adapter != null) {
+            try { adapter.pauseCast(); } catch (Throwable ignored) { }
+            try { adapter.stopAdvertise(); } catch (Throwable ignored) { }
+            try { adapter.disconnect(); } catch (Throwable ignored) { }
+            try {
+                adapter.unregisterCarConnectListener(connectListener);
+                adapter.unregisterPhoneDataListener(phoneDataListener);
+            } catch (Throwable ignored) { }
+            try { adapter.deInit(); } catch (Throwable t) { log("deInit 异常: " + t); }
+        }
+        adapter = null;
+        sdkInitialized = false;
+        sdkReady = false;
+        castStarted = false;
+        castSurface = null;
+        sessionActive = false;
+        lastPinCode = null;
+        initCanvasW = 0;
+        initCanvasH = 0;
+        wirelessFailStreak = ReconnectBackoff.resetStreak();
+        lastErrorCode = -1;
     }
 
     private void initSdk(UCarConfig config) {
@@ -481,12 +577,18 @@ public class IccoaManager {
                 case ST_CONNECTED:
                     // 设备已连接：撤销待执行的重新广播与看门狗，绝不打断进行中的会话。
                     sessionActive = true;
+                    wirelessFailStreak = ReconnectBackoff.resetStreak();   // 链路活了，退避复位
+                    lastErrorCode = -1;
                     cancelReAdvertise();
                     cancelAutoRefresh();
                     break;
 
                 case ST_FAILED:
                     // 失败 / 需要用户干预（parameter 是错误码）。会话没建立，重播一次把手机叫回来。
+                    // 但无线建链类失败（10003/10006/10008）说明 P2P 组正在 teardown，此时固定
+                    // 1.2 秒硬撞会把共用射频越推越乱 —— 按连续次数指数退避，给回收留出窗口。
+                    lastErrorCode = parameter;
+                    wirelessFailStreak = ReconnectBackoff.streakAfterFailure(wirelessFailStreak, parameter);
                     log("✗ 连接失败，错误码 " + parameter + " → 重播以重新触发配对");
                     sessionActive = false;
                     castStarted = false;
@@ -499,6 +601,7 @@ public class IccoaManager {
                 case ST_WFD_READY:
                     // 投屏通道就绪：会话必定在。丢掉旧的 cast 绑定，让新的 Surface 重新起投。
                     sessionActive = true;
+                    wirelessFailStreak = ReconnectBackoff.resetStreak();   // 通道起来了，退避复位
                     cancelReAdvertise();
                     cancelAutoRefresh();
                     castStarted = false;

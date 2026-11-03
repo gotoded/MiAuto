@@ -40,6 +40,8 @@ import com.andrerinas.openheadunit.utils.Settings
 import android.os.SystemClock
 import com.andrerinas.openheadunit.utils.SystemUI
 import com.bumptech.glide.Glide
+import com.miauto.app.DeviceDisplay
+import com.miauto.app.ScreenSizePolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
@@ -53,6 +55,9 @@ class MainActivity : BaseActivity() {
     var keyListener: KeyListener? = null
 
     private var isOrientationReceiverRegistered = false
+
+    /** Guards against stacking a second screen-size retry chain from a repeated onResume. */
+    private var screenSizeRetrying = false
     private var isFinishReceiverRegistered = false
     private var isRecreateReceiverRegistered = false
 
@@ -250,16 +255,51 @@ class MainActivity : BaseActivity() {
     /**
      * Starts the ICCOA link and tells the SDK how big our display is.
      *
-     * The screen size drives the stream resolution the phone negotiates, so it must be the real
-     * panel size rather than a hardcoded one. We normalise to long-side-first because a car head
-     * unit is landscape and the SDK expects a landscape canvas.
+     * The canvas the phone negotiates is fixed at `init()` time and there is no API to change it
+     * afterwards, so it has to be the real panel size. A hardcoded 1920x720 makes the phone encode
+     * for a canvas this screen does not have — stretched picture, and touch coordinates that land
+     * in the wrong place. The ordering of the pair follows the user's screen-orientation setting;
+     * that decision lives in [ScreenSizePolicy].
+     *
+     * `attempt` exists because the window is not always measured on the first call. Reporting a
+     * made-up size would be silently baked into the negotiation, so we wait and retry instead.
      */
-    private fun startIcocaLink() {
+    private fun startIcocaLink(attempt: Int = 0) {
         val bridge = App.provide(this).icocaBridge
-        val (longSide, shortSide) = currentScreenSize()
-        bridge.setScreenSize(longSide, shortSide)
-        AppLog.i("ICCOA: display ${longSide}x$shortSide — starting link")
+        val size = currentScreenSize()
+        if (size == null) {
+            // Already retrying, and this is a fresh call from onResume: one retry chain is enough.
+            if (screenSizeRetrying && attempt == 0) return
+            screenSizeRetrying = true
+            if (attempt < SCREEN_SIZE_RETRY_MAX) {
+                AppLog.w("ICCOA: 屏幕尺寸未就绪，400 ms 后重试（${attempt + 1}/$SCREEN_SIZE_RETRY_MAX）")
+                window.decorView.postDelayed({ startIcocaLink(attempt + 1) }, 400L)
+            } else {
+                screenSizeRetrying = false
+                AppLog.w("ICCOA: 屏幕尺寸始终未就绪，放弃本次启动")
+            }
+            return
+        }
+        screenSizeRetrying = false
+        bridge.setScreenSize(size.first, size.second)
+        AppLog.i("ICCOA: display ${size.first}x${size.second} — starting link")
         bridge.start()
+    }
+
+    /**
+     * The canvas to report to the SDK, ordered by the user's screen-orientation setting.
+     *
+     * @return null when the panel has not been measured yet. Callers must retry rather than
+     *   substitute a default: a wrong canvas is baked into the negotiation and nothing corrects it
+     *   for the rest of the session.
+     */
+    private fun currentScreenSize(): Pair<Int, Int>? {
+        val raw = DeviceDisplay.realSizePx(this)
+        val reported = ScreenSizePolicy.reported(
+            raw[0], raw[1], Settings(this).screenOrientation.value,
+        )
+        if (reported[0] <= 0 || reported[1] <= 0) return null
+        return reported[0] to reported[1]
     }
 
     /**
@@ -278,18 +318,6 @@ class MainActivity : BaseActivity() {
             return
         }
         startIcocaLink()
-    }
-
-    /** Real panel size in pixels, long side first. */
-    private fun currentScreenSize(): Pair<Int, Int> {
-        val (w, h) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            bounds.width() to bounds.height()
-        } else {
-            val dm = resources.displayMetrics
-            dm.widthPixels to dm.heightPixels
-        }
-        return maxOf(w, h) to minOf(w, h)
     }
 
     /**
@@ -1015,6 +1043,9 @@ class MainActivity : BaseActivity() {
 
     companion object {
         private const val permissionRequestCode = 97
+
+        /** How many times to re-measure the panel before giving up on starting the link. */
+        private const val SCREEN_SIZE_RETRY_MAX = 6
         const val EXTRA_LAUNCH_SOURCE = "launch_source"
 
         /** Launch sources that mean the app opened itself, with nobody necessarily watching. */
